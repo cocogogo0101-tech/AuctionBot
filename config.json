@@ -1,0 +1,12 @@
+{
+  "auction_role_id": 0,
+  "auction_channel_id": 0,
+  "auction_log_channel": 0,
+  "commission_percent": 20,
+  "emojis": {
+    "fire": "🔥",
+    "crown": "🏆",
+    "time": "⏳",
+    "money": "💰"
+  }
+}
