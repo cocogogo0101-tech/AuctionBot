@@ -6,6 +6,8 @@
 import os
 import asyncio
 from datetime import datetime, timezone, timedelta
+import csv
+from io import StringIO
 
 import discord
 from discord import app_commands
@@ -82,11 +84,23 @@ def save_config(cfg):
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_URL = os.getenv("DATA")  # كما طلبت: اسم المتغير DATA
+ALLOWED_GUILD_ID = os.getenv("ALLOWED_GUILD_ID")  # 🔒 ID السيرفر المسموح
 
 if not TOKEN:
     raise RuntimeError("ضع DISCORD_TOKEN في ملف .env")
 if not DATABASE_URL:
     raise RuntimeError("ضع DATA (Postgres connection string) في ملف .env")
+
+# تحويل ALLOWED_GUILD_ID إلى رقم إذا موجود
+if ALLOWED_GUILD_ID:
+    try:
+        ALLOWED_GUILD_ID = int(ALLOWED_GUILD_ID)
+        print(f"🔒 وضع الحماية مفعل: السيرفر المسموح فقط ID {ALLOWED_GUILD_ID}")
+    except:
+        print("⚠️ ALLOWED_GUILD_ID غير صحيح، سيتم تجاهله")
+        ALLOWED_GUILD_ID = None
+else:
+    print("⚠️ ALLOWED_GUILD_ID غير محدد، البوت سيعمل في أي سيرفر")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -113,6 +127,7 @@ class Auction:
         self.highest_bidder = None
         self.bids = []  # list of tuples (timestamp_iso, user_id, amount)
         self.ended = False
+        self.cancelled = False  # 🆕 حالة الإلغاء
         self.start_time = asyncio.get_event_loop().time()
 
     def to_log_embed(self, guild_name, emojis):
@@ -121,10 +136,16 @@ class Auction:
         time_emoji = emojis.get("time","⏳")
         money_emoji = emojis.get("money","💰")
 
-        embed = discord.Embed(title="📜 تقرير المزاد الكامل", color=0x2F3136)
+        # 🆕 تحديد لون حسب حالة المزاد
+        if self.cancelled:
+            embed = discord.Embed(title="🚫 تقرير المزاد - تم الإلغاء", color=0xe74c3c)
+        else:
+            embed = discord.Embed(title="📜 تقرير المزاد الكامل", color=0x2F3136)
+        
         embed.add_field(name="اسم السيرفر", value=guild_name, inline=False)
         embed.add_field(name="بداية المزاد", value=datetime.fromtimestamp(self.start_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
         embed.add_field(name="نهاية المزاد", value=datetime.fromtimestamp(self.end_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
+        
         if self.bids:
             text = ""
             for i, bid in enumerate(self.bids, start=1):
@@ -133,10 +154,17 @@ class Auction:
             embed.add_field(name="📋 سجل المزايدات", value=text, inline=False)
         else:
             embed.add_field(name="📋 سجل المزايدات", value="لا توجد مزايدات", inline=False)
+        
         participants = len(set([b[1] for b in self.bids]))
         embed.add_field(name="📊 إحصائيات", value=f"عدد المزايدات: {len(self.bids)}\nعدد المشاركين: {participants}\nأعلى مزايدة: {fmt_amount(self.current_price)}", inline=False)
-        winner = f"<@{self.highest_bidder}>" if self.highest_bidder else "لا يوجد"
-        embed.add_field(name="🏆 النتيجة", value=f"الفائز: {winner}\nالمبلغ النهائي: **{fmt_amount(self.current_price)}**", inline=False)
+        
+        # 🆕 معلومات النتيجة حسب الحالة
+        if self.cancelled:
+            embed.add_field(name="🚫 النتيجة", value=f"**تم إلغاء المزاد**\nآخر سعر: **{fmt_amount(self.current_price)}**", inline=False)
+        else:
+            winner = f"<@{self.highest_bidder}>" if self.highest_bidder else "لا يوجد"
+            embed.add_field(name="🏆 النتيجة", value=f"الفائز: {winner}\nالمبلغ النهائي: **{fmt_amount(self.current_price)}**", inline=False)
+        
         embed.set_footer(text="السماء الجنوبية | نظام المزادات")
         return embed
 
@@ -151,7 +179,7 @@ class BidModal(Modal, title="اكتب المبلغ"):
     async def on_submit(self, interaction: discord.Interaction):
         amt = parse_amount(self.amount.value)
         auction = AUCTIONS.get(self.auction_message_id)
-        if not auction or auction.ended:
+        if not auction or auction.ended or auction.cancelled:
             await interaction.response.send_message("المزاد غير متاح الآن.", ephemeral=True)
             return
         if interaction.user.bot:
@@ -206,7 +234,7 @@ class AuctionView(View):
     @discord.ui.button(label="زايد +", style=discord.ButtonStyle.primary, custom_id="quick_bid")
     async def quick_bid(self, interaction: discord.Interaction, button: Button):
         auction = AUCTIONS.get(self.auction_message_id)
-        if not auction or auction.ended:
+        if not auction or auction.ended or auction.cancelled:
             await interaction.response.send_message("المزاد غير متاح.", ephemeral=True)
             return
         cfg = load_config()
@@ -248,7 +276,7 @@ class AuctionView(View):
     @discord.ui.button(label="مبلغ مخصّص", style=discord.ButtonStyle.secondary, custom_id="custom_bid")
     async def custom_bid(self, interaction: discord.Interaction, button: Button):
         auction = AUCTIONS.get(self.auction_message_id)
-        if not auction or auction.ended:
+        if not auction or auction.ended or auction.cancelled:
             await interaction.response.send_message("المزاد غير متاح.", ephemeral=True)
             return
         await interaction.response.send_modal(BidModal(self.auction_message_id))
@@ -295,6 +323,246 @@ async def cmd_create_auction(interaction: discord.Interaction, start: str, min_i
     # جدولة الانتهاء
     asyncio.create_task(handle_auction_end(msg.id, auction.end_time))
     await interaction.followup.send(f"تم إنشاء لوحة المزاد في {target_channel.mention}", ephemeral=True)
+
+# 🆕 أمر إلغاء المزاد
+@tree.command(name="إلغاء_مزاد", description="إلغاء مزاد نشط (إدارة فقط)")
+@app_commands.describe(message_id="ID رسالة المزاد المراد إلغاؤه")
+async def cmd_cancel_auction(interaction: discord.Interaction, message_id: str):
+    await interaction.response.defer(ephemeral=True)
+    
+    # التحقق من الصلاحيات
+    if not interaction.user.guild_permissions.manage_guild and not interaction.user.guild_permissions.manage_messages:
+        await interaction.followup.send("أمر محظور: تحتاج صلاحيات إدارة.", ephemeral=True)
+        return
+    
+    try:
+        msg_id = int(message_id)
+    except:
+        await interaction.followup.send("❌ ID الرسالة غير صحيح", ephemeral=True)
+        return
+    
+    auction = AUCTIONS.get(msg_id)
+    if not auction:
+        await interaction.followup.send("❌ لم أجد هذا المزاد في النظام", ephemeral=True)
+        return
+    
+    if auction.ended or auction.cancelled:
+        await interaction.followup.send("❌ المزاد منتهي أو ملغي بالفعل", ephemeral=True)
+        return
+    
+    # وضع علامة الإلغاء
+    auction.cancelled = True
+    auction.ended = True
+    
+    # تحديث الرسالة
+    channel = bot.get_channel(auction.channel_id)
+    try:
+        msg = await channel.fetch_message(auction.message_id)
+        embed = discord.Embed(title="🚫 تم إلغاء المزاد", color=0xe74c3c)
+        embed.add_field(name="السبب", value="تم الإلغاء من قبل الإدارة", inline=False)
+        if auction.highest_bidder:
+            embed.add_field(name="آخر مزايد", value=f"<@{auction.highest_bidder}>", inline=True)
+            embed.add_field(name="آخر سعر", value=f"**{fmt_amount(auction.current_price)}**", inline=True)
+        embed.set_footer(text="السماء الجنوبية | نظام المزادات")
+        await msg.edit(embed=embed, view=None)
+    except Exception as e:
+        print(f"Error updating cancelled auction message: {e}")
+    
+    # تحديث قاعدة البيانات
+    try:
+        await db.cancel_auction(auction.db_id)
+    except Exception as e:
+        print(f"DB cancel auction error: {e}")
+    
+    # إرسال لوق
+    cfg = load_config()
+    log_ch = bot.get_channel(cfg.get("auction_log_channel"))
+    if log_ch:
+        emojis = cfg.get("emojis",{})
+        full_embed = auction.to_log_embed(interaction.guild.name, emojis)
+        await log_ch.send(f"⚠️ تم إلغاء المزاد بواسطة <@{interaction.user.id}>", embed=full_embed)
+    
+    # حذف من الذاكرة
+    AUCTIONS.pop(msg_id, None)
+    
+    await interaction.followup.send("✅ تم إلغاء المزاد بنجاح", ephemeral=True)
+
+# 🆕 أمر عرض سجل المزادات
+@tree.command(name="سجل_المزادات", description="عرض المزادات السابقة")
+@app_commands.describe(limit="عدد المزادات المراد عرضها (افتراضي: 10)")
+async def cmd_auction_history(interaction: discord.Interaction, limit: int = 10):
+    await interaction.response.defer(ephemeral=True)
+    
+    if limit < 1 or limit > 50:
+        await interaction.followup.send("❌ الحد الأدنى 1 والحد الأقصى 50", ephemeral=True)
+        return
+    
+    try:
+        history = await db.get_auction_history(interaction.guild_id, limit)
+        
+        if not history:
+            await interaction.followup.send("📭 لا توجد مزادات سابقة في هذا السيرفر", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title="📚 سجل المزادات",
+            description=f"آخر {len(history)} مزاد في السيرفر",
+            color=0x3498db
+        )
+        
+        for i, auction_data in enumerate(history, start=1):
+            auction_id = auction_data.get('id')
+            started_at = auction_data.get('started_at')
+            ended_at = auction_data.get('ended_at')
+            winner_id = auction_data.get('winner_id')
+            final_price = auction_data.get('current_price')
+            cancelled = auction_data.get('cancelled', False)
+            
+            # تنسيق التاريخ
+            if isinstance(started_at, str):
+                started_at = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+            date_str = started_at.strftime("%Y-%m-%d %H:%M") if started_at else "غير محدد"
+            
+            # معلومات الحالة
+            if cancelled:
+                status = "🚫 ملغي"
+                winner_str = "تم الإلغاء"
+            elif winner_id:
+                status = "✅ مكتمل"
+                winner_str = f"<@{winner_id}>"
+            else:
+                status = "❌ لم يتم البيع"
+                winner_str = "لا يوجد فائز"
+            
+            value_text = f"**التاريخ:** {date_str}\n**الحالة:** {status}\n**الفائز:** {winner_str}\n**السعر النهائي:** {fmt_amount(final_price or 0)}"
+            
+            embed.add_field(
+                name=f"#{auction_id}",
+                value=value_text,
+                inline=False
+            )
+        
+        embed.set_footer(text="السماء الجنوبية | نظام المزادات")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        print(f"Error fetching auction history: {e}")
+        await interaction.followup.send("❌ حدث خطأ أثناء جلب السجل", ephemeral=True)
+
+# 🆕 أمر تصدير البيانات
+@tree.command(name="تصدير_مزادات", description="تصدير بيانات المزادات كملف CSV (إدارة فقط)")
+@app_commands.describe(limit="عدد المزادات (افتراضي: 100)")
+async def cmd_export_auctions(interaction: discord.Interaction, limit: int = 100):
+    await interaction.response.defer(ephemeral=True)
+    
+    # التحقق من الصلاحيات
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.followup.send("أمر محظور: تحتاج صلاحيات إدارة.", ephemeral=True)
+        return
+    
+    if limit < 1 or limit > 500:
+        await interaction.followup.send("❌ الحد الأدنى 1 والحد الأقصى 500", ephemeral=True)
+        return
+    
+    try:
+        # جلب البيانات
+        auctions = await db.get_auction_history(interaction.guild_id, limit)
+        
+        if not auctions:
+            await interaction.followup.send("📭 لا توجد بيانات للتصدير", ephemeral=True)
+            return
+        
+        # إنشاء CSV
+        output = StringIO()
+        writer = csv.writer(output)
+        
+        # الهيدر
+        writer.writerow([
+            'Auction ID',
+            'Started At',
+            'Ended At',
+            'Duration (minutes)',
+            'Start Price',
+            'Final Price',
+            'Winner ID',
+            'Winner Username',
+            'Creator ID',
+            'Total Bids',
+            'Status'
+        ])
+        
+        # البيانات
+        for auction_data in auctions:
+            auction_id = auction_data.get('id')
+            started_at = auction_data.get('started_at')
+            ended_at = auction_data.get('ended_at')
+            start_price = auction_data.get('start_price', 0)
+            final_price = auction_data.get('current_price', 0)
+            winner_id = auction_data.get('winner_id')
+            creator_id = auction_data.get('created_by')
+            cancelled = auction_data.get('cancelled', False)
+            
+            # حساب المدة
+            duration = "N/A"
+            if started_at and ended_at:
+                if isinstance(started_at, str):
+                    started_at = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                if isinstance(ended_at, str):
+                    ended_at = datetime.fromisoformat(ended_at.replace('Z', '+00:00'))
+                duration_delta = ended_at - started_at
+                duration = round(duration_delta.total_seconds() / 60, 2)
+            
+            # الحصول على اسم المستخدم الفائز
+            winner_username = "N/A"
+            if winner_id:
+                try:
+                    winner = await bot.fetch_user(winner_id)
+                    winner_username = str(winner)
+                except:
+                    winner_username = f"User#{winner_id}"
+            
+            # جلب عدد المزايدات
+            bids = await db.get_bids_for_auction(auction_id)
+            total_bids = len(bids)
+            
+            # الحالة
+            if cancelled:
+                status = "Cancelled"
+            elif winner_id:
+                status = "Completed"
+            else:
+                status = "No Sale"
+            
+            writer.writerow([
+                auction_id,
+                started_at.isoformat() if started_at else "N/A",
+                ended_at.isoformat() if ended_at else "N/A",
+                duration,
+                start_price,
+                final_price,
+                winner_id or "N/A",
+                winner_username,
+                creator_id or "N/A",
+                total_bids,
+                status
+            ])
+        
+        # تحويل إلى ملف
+        output.seek(0)
+        file = discord.File(
+            fp=output,
+            filename=f"auctions_export_{interaction.guild.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        
+        await interaction.followup.send(
+            f"✅ تم تصدير {len(auctions)} مزاد",
+            file=file,
+            ephemeral=True
+        )
+        
+    except Exception as e:
+        print(f"Error exporting auctions: {e}")
+        await interaction.followup.send("❌ حدث خطأ أثناء التصدير", ephemeral=True)
 
 @tree.command(name="set_auction_role", description="تحديد رتبة رواد المزاد (إداري فقط)")
 @app_commands.describe(role="رتبة الرواد")
@@ -382,17 +650,80 @@ async def handle_auction_end(message_id:int, end_time:float):
     AUCTIONS.pop(message_id, None)
 
 # ---------- Events ----------
+# 🔒 حماية السيرفر - الخروج من السيرفرات غير المسموحة
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    if ALLOWED_GUILD_ID and guild.id != ALLOWED_GUILD_ID:
+        print(f"🚫 Attempted to join unauthorized guild: {guild.name} (ID: {guild.id})")
+        print(f"🚪 Leaving guild immediately...")
+        
+        # محاولة إرسال رسالة للسيرفر قبل المغادرة (اختياري)
+        try:
+            # البحث عن قناة عامة لإرسال رسالة
+            for channel in guild.text_channels:
+                if channel.permissions_for(guild.me).send_messages:
+                    embed = discord.Embed(
+                        title="🚫 غير مصرح",
+                        description="عذراً، هذا البوت خاص ومقتصر على سيرفر معين فقط.",
+                        color=0xe74c3c
+                    )
+                    embed.add_field(name="السبب", value="البوت مُقفل على سيرفر محدد", inline=False)
+                    embed.set_footer(text="السماء الجنوبية | نظام المزادات")
+                    await channel.send(embed=embed)
+                    break
+        except Exception as e:
+            print(f"Could not send message before leaving: {e}")
+        
+        # المغادرة من السيرفر
+        await guild.leave()
+        print(f"✅ Successfully left guild: {guild.name}")
+
 @bot.event
 async def on_ready():
     # init DB pool
     await db.init_pool(os.getenv("DATA"))
     await db.create_tables()
+    
+    # 🔒 التحقق من السيرفرات الحالية
+    if ALLOWED_GUILD_ID:
+        print(f"\n🔒 Checking current guilds against allowed guild ID: {ALLOWED_GUILD_ID}")
+        guilds_to_leave = []
+        
+        for guild in bot.guilds:
+            if guild.id != ALLOWED_GUILD_ID:
+                print(f"🚫 Found unauthorized guild: {guild.name} (ID: {guild.id})")
+                guilds_to_leave.append(guild)
+            else:
+                print(f"✅ Authorized guild found: {guild.name} (ID: {guild.id})")
+        
+        # المغادرة من السيرفرات غير المصرح بها
+        for guild in guilds_to_leave:
+            try:
+                print(f"🚪 Leaving unauthorized guild: {guild.name}")
+                await guild.leave()
+                print(f"✅ Successfully left: {guild.name}")
+            except Exception as e:
+                print(f"❌ Error leaving guild {guild.name}: {e}")
+        
+        if guilds_to_leave:
+            print(f"\n🧹 Cleaned up {len(guilds_to_leave)} unauthorized guild(s)")
+    
     try:
         await tree.sync()
+        print("✅ Slash commands synced")
     except Exception as e:
-        print("sync error:", e)
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print("DB pool ready and tables ensured.")
+        print(f"❌ Sync error: {e}")
+    
+    print(f"\n{'='*50}")
+    print(f"✅ Bot is ready!")
+    print(f"👤 Logged in as: {bot.user} (ID: {bot.user.id})")
+    print(f"🗄️  Database: Connected")
+    print(f"🌐 Guilds: {len(bot.guilds)}")
+    if ALLOWED_GUILD_ID:
+        print(f"🔒 Guild Lock: ACTIVE (ID: {ALLOWED_GUILD_ID})")
+    else:
+        print(f"⚠️  Guild Lock: DISABLED")
+    print(f"{'='*50}\n")
 
 # ---------- keep alive ----------
 try:
