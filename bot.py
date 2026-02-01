@@ -2,12 +2,18 @@
 # السماء الجنوبية - بوت المزادات (مع Supabase/Postgres)
 # كل شيء في ملف واحد رئيسي للتشغيل؛ الاعتماد على db.py للعمليات
 # يتطلب: python 3.10+ (مستحسن)
+# 🛡️ Self-Healing Bot مع بروتوكولات أمان
 
 import os
 import asyncio
 from datetime import datetime, timezone, timedelta
 import csv
 from io import StringIO
+import logging
+import sys
+import traceback
+from typing import Optional
+import time
 
 import discord
 from discord import app_commands
@@ -19,6 +25,23 @@ import json
 
 # ملف التعامل مع قاعدة البيانات (موجود في نفس الجذر)
 import db
+
+# ---------- 🛡️ Security & Logging Setup ----------
+# تكوين نظام اللوقات المحسّن
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger('AuctionBot')
+
+# 🔄 Retry Configuration
+MAX_RETRIES = 5
+RETRY_DELAY = 5  # ثوان
+EXPONENTIAL_BACKOFF = True
 
 # ---------- Helpers ----------
 def parse_amount(text: str) -> int:
@@ -86,6 +109,14 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_URL = os.getenv("DATA")  # كما طلبت: اسم المتغير DATA
 ALLOWED_GUILD_ID = os.getenv("ALLOWED_GUILD_ID")  # 🔒 ID السيرفر المسموح
 
+# 🔧 تنظيف TOKEN من المسافات والأسطر الجديدة
+if TOKEN:
+    TOKEN = TOKEN.strip()
+if DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.strip()
+if ALLOWED_GUILD_ID:
+    ALLOWED_GUILD_ID = ALLOWED_GUILD_ID.strip()
+
 if not TOKEN:
     raise RuntimeError("ضع DISCORD_TOKEN في ملف .env")
 if not DATABASE_URL:
@@ -95,20 +126,57 @@ if not DATABASE_URL:
 if ALLOWED_GUILD_ID:
     try:
         ALLOWED_GUILD_ID = int(ALLOWED_GUILD_ID)
-        print(f"🔒 وضع الحماية مفعل: السيرفر المسموح فقط ID {ALLOWED_GUILD_ID}")
+        logger.info(f"🔒 وضع الحماية مفعل: السيرفر المسموح فقط ID {ALLOWED_GUILD_ID}")
     except:
-        print("⚠️ ALLOWED_GUILD_ID غير صحيح، سيتم تجاهله")
+        logger.warning("⚠️ ALLOWED_GUILD_ID غير صحيح، سيتم تجاهله")
         ALLOWED_GUILD_ID = None
 else:
-    print("⚠️ ALLOWED_GUILD_ID غير محدد، البوت سيعمل في أي سيرفر")
+    logger.warning("⚠️ ALLOWED_GUILD_ID غير محدد، البوت سيعمل في أي سيرفر")
 
+# 🔧 إعدادات البوت المحسّنة
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+# إنشاء البوت مع معالج أخطاء محسّن
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    help_command=None,
+    max_messages=1000,  # تقليل استهلاك الذاكرة
+    heartbeat_timeout=60.0,  # زيادة timeout
+    guild_ready_timeout=10.0
+)
 tree = bot.tree
+
+# 🛡️ نظام إحصائيات الأخطاء
+class ErrorStats:
+    def __init__(self):
+        self.errors = []
+        self.last_error_time = None
+        self.consecutive_errors = 0
+        self.total_errors = 0
+    
+    def add_error(self, error_type: str):
+        now = time.time()
+        self.errors.append({'type': error_type, 'time': now})
+        self.last_error_time = now
+        self.consecutive_errors += 1
+        self.total_errors += 1
+        
+        # احتفظ بآخر 100 خطأ فقط
+        if len(self.errors) > 100:
+            self.errors = self.errors[-100:]
+    
+    def reset_consecutive(self):
+        self.consecutive_errors = 0
+    
+    def should_restart(self) -> bool:
+        # إعادة التشغيل إذا كان هناك أكثر من 10 أخطاء متتالية
+        return self.consecutive_errors >= 10
+
+error_stats = ErrorStats()
 
 # ---------- In-memory cache ----------
 AUCTIONS = {}  # message_id -> Auction instance
@@ -650,12 +718,40 @@ async def handle_auction_end(message_id:int, end_time:float):
     AUCTIONS.pop(message_id, None)
 
 # ---------- Events ----------
+# 🛡️ معالج الأخطاء العام
+@bot.event
+async def on_error(event: str, *args, **kwargs):
+    error_stats.add_error(event)
+    logger.error(f"❌ خطأ في event {event}: {traceback.format_exc()}")
+    
+    # إذا كانت الأخطاء كثيرة، جرب إعادة الاتصال
+    if error_stats.should_restart():
+        logger.critical("⚠️ أخطاء كثيرة متتالية! محاولة إعادة الاتصال...")
+        error_stats.reset_consecutive()
+        try:
+            await bot.close()
+            await asyncio.sleep(10)
+        except:
+            pass
+
+# 🔄 معالج قطع الاتصال
+@bot.event
+async def on_disconnect():
+    logger.warning("⚠️ تم قطع الاتصال بـ Discord")
+    error_stats.add_error('disconnect')
+
+# ✅ معالج استئناف الاتصال
+@bot.event
+async def on_resumed():
+    logger.info("✅ تم استئناف الاتصال بـ Discord بنجاح")
+    error_stats.reset_consecutive()
+
 # 🔒 حماية السيرفر - الخروج من السيرفرات غير المسموحة
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     if ALLOWED_GUILD_ID and guild.id != ALLOWED_GUILD_ID:
-        print(f"🚫 Attempted to join unauthorized guild: {guild.name} (ID: {guild.id})")
-        print(f"🚪 Leaving guild immediately...")
+        logger.warning(f"🚫 Attempted to join unauthorized guild: {guild.name} (ID: {guild.id})")
+        logger.info(f"🚪 Leaving guild immediately...")
         
         # محاولة إرسال رسالة للسيرفر قبل المغادرة (اختياري)
         try:
@@ -672,66 +768,176 @@ async def on_guild_join(guild: discord.Guild):
                     await channel.send(embed=embed)
                     break
         except Exception as e:
-            print(f"Could not send message before leaving: {e}")
+            logger.error(f"Could not send message before leaving: {e}")
         
         # المغادرة من السيرفر
         await guild.leave()
-        print(f"✅ Successfully left guild: {guild.name}")
+        logger.info(f"✅ Successfully left guild: {guild.name}")
 
 @bot.event
 async def on_ready():
-    # init DB pool
-    await db.init_pool(os.getenv("DATA"))
-    await db.create_tables()
-    
-    # 🔒 التحقق من السيرفرات الحالية
-    if ALLOWED_GUILD_ID:
-        print(f"\n🔒 Checking current guilds against allowed guild ID: {ALLOWED_GUILD_ID}")
-        guilds_to_leave = []
-        
-        for guild in bot.guilds:
-            if guild.id != ALLOWED_GUILD_ID:
-                print(f"🚫 Found unauthorized guild: {guild.name} (ID: {guild.id})")
-                guilds_to_leave.append(guild)
-            else:
-                print(f"✅ Authorized guild found: {guild.name} (ID: {guild.id})")
-        
-        # المغادرة من السيرفرات غير المصرح بها
-        for guild in guilds_to_leave:
-            try:
-                print(f"🚪 Leaving unauthorized guild: {guild.name}")
-                await guild.leave()
-                print(f"✅ Successfully left: {guild.name}")
-            except Exception as e:
-                print(f"❌ Error leaving guild {guild.name}: {e}")
-        
-        if guilds_to_leave:
-            print(f"\n🧹 Cleaned up {len(guilds_to_leave)} unauthorized guild(s)")
-    
+    """
+    🚀 Event يتم استدعاؤه عند اتصال البوت بنجاح
+    """
     try:
-        await tree.sync()
-        print("✅ Slash commands synced")
+        # init DB pool
+        logger.info("🔌 Connecting to database...")
+        await db.init_pool(os.getenv("DATA"))
+        await db.create_tables()
+        logger.info("✅ Database connected and tables ensured")
+        
+        # 🔒 التحقق من السيرفرات الحالية
+        if ALLOWED_GUILD_ID:
+            logger.info(f"🔒 Checking current guilds against allowed guild ID: {ALLOWED_GUILD_ID}")
+            guilds_to_leave = []
+            
+            for guild in bot.guilds:
+                if guild.id != ALLOWED_GUILD_ID:
+                    logger.warning(f"🚫 Found unauthorized guild: {guild.name} (ID: {guild.id})")
+                    guilds_to_leave.append(guild)
+                else:
+                    logger.info(f"✅ Authorized guild found: {guild.name} (ID: {guild.id})")
+            
+            # المغادرة من السيرفرات غير المصرح بها
+            for guild in guilds_to_leave:
+                try:
+                    logger.info(f"🚪 Leaving unauthorized guild: {guild.name}")
+                    await guild.leave()
+                    logger.info(f"✅ Successfully left: {guild.name}")
+                except Exception as e:
+                    logger.error(f"❌ Error leaving guild {guild.name}: {e}")
+            
+            if guilds_to_leave:
+                logger.info(f"🧹 Cleaned up {len(guilds_to_leave)} unauthorized guild(s)")
+        
+        # مزامنة الأوامر
+        try:
+            logger.info("🔄 Syncing slash commands...")
+            await tree.sync()
+            logger.info("✅ Slash commands synced successfully")
+            error_stats.reset_consecutive()  # إعادة تعيين عداد الأخطاء عند النجاح
+        except Exception as e:
+            logger.error(f"❌ Sync error: {e}")
+            error_stats.add_error('sync_failed')
+        
+        # طباعة معلومات البوت
+        logger.info("=" * 50)
+        logger.info("✅ Bot is ready and operational!")
+        logger.info(f"👤 Logged in as: {bot.user} (ID: {bot.user.id})")
+        logger.info(f"🗄️  Database: Connected")
+        logger.info(f"🌐 Guilds: {len(bot.guilds)}")
+        if ALLOWED_GUILD_ID:
+            logger.info(f"🔒 Guild Lock: ACTIVE (ID: {ALLOWED_GUILD_ID})")
+        else:
+            logger.warning(f"⚠️  Guild Lock: DISABLED")
+        logger.info(f"📊 Total Errors: {error_stats.total_errors}")
+        logger.info("=" * 50)
+        
     except Exception as e:
-        print(f"❌ Sync error: {e}")
-    
-    print(f"\n{'='*50}")
-    print(f"✅ Bot is ready!")
-    print(f"👤 Logged in as: {bot.user} (ID: {bot.user.id})")
-    print(f"🗄️  Database: Connected")
-    print(f"🌐 Guilds: {len(bot.guilds)}")
-    if ALLOWED_GUILD_ID:
-        print(f"🔒 Guild Lock: ACTIVE (ID: {ALLOWED_GUILD_ID})")
-    else:
-        print(f"⚠️  Guild Lock: DISABLED")
-    print(f"{'='*50}\n")
+        logger.critical(f"❌ Critical error in on_ready: {e}")
+        logger.critical(traceback.format_exc())
+        error_stats.add_error('on_ready_failed')
 
 # ---------- keep alive ----------
 try:
     from web import keep_alive
     keep_alive()
+    logger.info("✅ Web server started for keep-alive")
 except Exception as e:
-    print("web keep alive not started:", e)
+    logger.warning(f"⚠️ Web keep alive not started: {e}")
+
+# ---------- 🛡️ Self-Healing Run with Retry Logic ----------
+async def run_bot_with_retry():
+    """
+    تشغيل البوت مع نظام إعادة المحاولة التلقائي
+    """
+    retry_count = 0
+    
+    while retry_count < MAX_RETRIES:
+        try:
+            logger.info(f"🚀 Starting bot... (Attempt {retry_count + 1}/{MAX_RETRIES})")
+            
+            # تشغيل البوت
+            async with bot:
+                await bot.start(TOKEN)
+                
+        except discord.LoginFailure as e:
+            logger.critical(f"❌ LOGIN FAILED: Invalid Discord token!")
+            logger.critical(f"Error: {e}")
+            logger.critical("Please check your DISCORD_TOKEN in environment variables")
+            break  # لا نعيد المحاولة إذا كان الـ Token خاطئ
+            
+        except discord.HTTPException as e:
+            retry_count += 1
+            
+            if e.status == 429:  # Rate limited
+                logger.warning(f"⚠️ Rate limited by Discord! Status: {e.status}")
+                wait_time = RETRY_DELAY * (2 ** retry_count if EXPONENTIAL_BACKOFF else 1)
+                logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+                await asyncio.sleep(wait_time)
+                
+            elif e.status in [502, 503, 504]:  # Server errors
+                logger.warning(f"⚠️ Discord server error: {e.status}")
+                wait_time = RETRY_DELAY * (2 ** retry_count if EXPONENTIAL_BACKOFF else 1)
+                logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+                await asyncio.sleep(wait_time)
+                
+            else:
+                logger.error(f"❌ HTTP Exception: {e}")
+                wait_time = RETRY_DELAY * 2
+                logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+                await asyncio.sleep(wait_time)
+                
+        except discord.ConnectionClosed as e:
+            retry_count += 1
+            logger.warning(f"⚠️ Connection closed: {e}")
+            wait_time = RETRY_DELAY * (2 ** retry_count if EXPONENTIAL_BACKOFF else 1)
+            logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+            await asyncio.sleep(wait_time)
+            
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"❌ Unexpected error: {type(e).__name__}: {e}")
+            logger.error(traceback.format_exc())
+            
+            if retry_count < MAX_RETRIES:
+                wait_time = RETRY_DELAY * (2 ** retry_count if EXPONENTIAL_BACKOFF else 1)
+                logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.critical("❌ Maximum retries reached. Stopping bot.")
+                break
+        
+        # إذا وصلنا هنا، يعني البوت توقف بشكل طبيعي
+        if retry_count == 0:
+            logger.info("✅ Bot stopped normally")
+            break
+        else:
+            logger.info(f"♻️ Attempting to restart... (Attempt {retry_count + 1}/{MAX_RETRIES})")
+    
+    logger.info("🛑 Bot shutdown complete")
 
 # ---------- Run ----------
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    try:
+        # التأكد من وجود الـ Token
+        if not TOKEN or len(TOKEN) < 50:
+            logger.critical("❌ CRITICAL: Invalid or missing DISCORD_TOKEN")
+            logger.critical("Please check your environment variables in Render")
+            logger.critical(f"Token length: {len(TOKEN) if TOKEN else 0}")
+            sys.exit(1)
+        
+        logger.info("=" * 50)
+        logger.info("🤖 AuctionBot - السماء الجنوبية")
+        logger.info("🛡️ Self-Healing System Active")
+        logger.info("=" * 50)
+        
+        # تشغيل البوت مع نظام إعادة المحاولة
+        asyncio.run(run_bot_with_retry())
+        
+    except KeyboardInterrupt:
+        logger.info("⚠️ Bot stopped by user (Ctrl+C)")
+    except Exception as e:
+        logger.critical(f"❌ FATAL ERROR: {e}")
+        logger.critical(traceback.format_exc())
+        sys.exit(1)

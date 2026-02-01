@@ -1,0 +1,34 @@
+{
+  "retry": {
+    "max_retries": 5,
+    "base_delay": 5,
+    "exponential_backoff": true,
+    "max_delay": 300
+  },
+  "rate_limiting": {
+    "enabled": true,
+    "requests_per_minute": 50,
+    "burst_limit": 10
+  },
+  "error_handling": {
+    "auto_restart": true,
+    "max_consecutive_errors": 10,
+    "error_cooldown": 60
+  },
+  "logging": {
+    "level": "INFO",
+    "file_enabled": true,
+    "console_enabled": true,
+    "max_log_size_mb": 10
+  },
+  "health_check": {
+    "enabled": true,
+    "interval_seconds": 300,
+    "timeout_seconds": 30
+  },
+  "cloudflare_bypass": {
+    "enabled": true,
+    "user_agent": "DiscordBot (https://github.com/southernsky, 2.0)",
+    "respect_rate_limits": true
+  }
+}
