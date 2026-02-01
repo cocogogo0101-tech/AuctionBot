@@ -1,3 +1,20 @@
+# ====================================================================
+# AUCTIONBOT v3.0 - COMPLETE CODE BUNDLE
+# ====================================================================
+# المطور: دارك
+# السيرفر: السماء الجنوبية
+# النسخة: 3.0.0 Railway Edition
+# ====================================================================
+#
+# هذا الملف يحتوي على جميع الأكواد مجمعة في مكان واحد
+# للمرجعية والنسخ الاحتياطي
+#
+# ====================================================================
+
+# ====================================================================
+# FILE: bot.py
+# ====================================================================
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -38,9 +55,8 @@ def clean_env(var_name: str) -> str:
     """تنظيف متغيرات البيئة من المسافات والأسطر الجديدة"""
     value = os.getenv(var_name, "")
     if value:
-        # حذف المسافات والأسطر الجديدة والعلامات
         value = value.strip()
-        value = value.replace('\n', '').replace('\r', '')
+        value = value.replace('\\n', '').replace('\\r', '')
         value = value.replace('"', '').replace("'", '')
     return value
 
@@ -52,12 +68,10 @@ ALLOWED_GUILD_ID = clean_env("ALLOWED_GUILD_ID")
 # التحقق من المتغيرات الأساسية
 if not TOKEN:
     print("❌ CRITICAL ERROR: DISCORD_TOKEN is missing!")
-    print("💡 Add DISCORD_TOKEN to your Railway environment variables")
     sys.exit(1)
 
 if not DATABASE_URL:
     print("❌ CRITICAL ERROR: DATA (Database URL) is missing!")
-    print("💡 Add DATA to your Railway environment variables")
     sys.exit(1)
 
 # تحويل ALLOWED_GUILD_ID إلى رقم
@@ -65,7 +79,6 @@ if ALLOWED_GUILD_ID:
     try:
         ALLOWED_GUILD_ID = int(ALLOWED_GUILD_ID)
     except:
-        print("⚠️ WARNING: ALLOWED_GUILD_ID is invalid, ignoring...")
         ALLOWED_GUILD_ID = None
 
 # ==================== 📊 LOGGING SETUP ====================
@@ -97,10 +110,9 @@ tree = bot.tree
 
 # ==================== 💾 IN-MEMORY STORAGE ====================
 
-AUCTIONS = {}  # message_id -> Auction object
+AUCTIONS = {}
 
 class Auction:
-    """كلاس المزاد"""
     def __init__(self, guild_id: int, channel_id: int, message_id: int, db_id: int,
                  start_price: int, min_increase: int, end_time: float, created_by: int):
         self.guild_id = guild_id
@@ -119,7 +131,6 @@ class Auction:
         self.start_time = asyncio.get_event_loop().time()
 
     def to_log_embed(self, guild_name: str) -> discord.Embed:
-        """إنشاء embed للوق"""
         if self.cancelled:
             embed = discord.Embed(title="🚫 تقرير المزاد - تم الإلغاء", color=0xe74c3c)
         else:
@@ -134,9 +145,9 @@ class Auction:
         
         if self.bids:
             text = ""
-            for i, bid in enumerate(self.bids[-10:], start=1):  # آخر 10 مزايدات فقط
+            for i, bid in enumerate(self.bids[-10:], start=1):
                 t_iso, uid, amt = bid
-                text += f"{i}. <@{uid}> — **{fmt_amount(amt)}**\n"
+                text += f"{i}. <@{uid}> — **{fmt_amount(amt)}**\\n"
             embed.add_field(name="📋 سجل المزايدات", value=text or "لا توجد", inline=False)
         
         participants = len(set([b[1] for b in self.bids]))
@@ -149,14 +160,14 @@ class Auction:
         if self.cancelled:
             embed.add_field(
                 name="🚫 النتيجة",
-                value=f"**تم الإلغاء**\nآخر سعر: **{fmt_amount(self.current_price)}**",
+                value=f"**تم الإلغاء**\\nآخر سعر: **{fmt_amount(self.current_price)}**",
                 inline=False
             )
         else:
             winner = f"<@{self.highest_bidder}>" if self.highest_bidder else "لا يوجد"
             embed.add_field(
                 name="🏆 النتيجة",
-                value=f"الفائز: {winner}\nالمبلغ: **{fmt_amount(self.current_price)}**",
+                value=f"الفائز: {winner}\\nالمبلغ: **{fmt_amount(self.current_price)}**",
                 inline=False
             )
         
@@ -166,12 +177,9 @@ class Auction:
 # ==================== 🔧 HELPER FUNCTIONS ====================
 
 def parse_amount(text: str) -> int:
-    """تحويل النص إلى رقم (يدعم k و m)"""
     if not text:
         return 0
-    
     s = str(text).strip().lower().replace(",", "")
-    
     try:
         if s.isdigit():
             return int(s)
@@ -184,24 +192,19 @@ def parse_amount(text: str) -> int:
         return 0
 
 def fmt_amount(n: int) -> str:
-    """تنسيق الرقم (يحول إلى k أو m)"""
     if not n:
         return "0"
-    
     if n >= 1_000_000:
         v = n / 1_000_000
         return f"{int(v)}m" if v.is_integer() else f"{v:.2f}m"
-    
     if n >= 1_000:
         v = n / 1_000
         return f"{int(v)}k" if v.is_integer() else f"{v:.1f}k"
-    
     return f"{n:,}"
 
 # ==================== 🎨 UI COMPONENTS ====================
 
 class BidModal(Modal, title="اكتب المبلغ"):
-    """نافذة إدخال مبلغ مخصص"""
     amount = TextInput(
         label="المبلغ (مثال: 100k أو 1m)",
         placeholder="مثال: 500k",
@@ -228,24 +231,21 @@ class BidModal(Modal, title="اكتب المبلغ"):
         min_needed = auction.current_price + auction.min_increase
         if amt < min_needed:
             await interaction.response.send_message(
-                f"❌ المبلغ أقل من المطلوب\nالحد الأدنى: **{fmt_amount(min_needed)}**",
+                f"❌ المبلغ أقل من المطلوب\\nالحد الأدنى: **{fmt_amount(min_needed)}**",
                 ephemeral=True
             )
             return
         
-        # تسجيل المزايدة
         auction.current_price = amt
         auction.highest_bidder = interaction.user.id
         ts = datetime.now(timezone.utc).isoformat()
         auction.bids.append((ts, interaction.user.id, amt))
         
-        # حفظ في قاعدة البيانات
         try:
             await db.insert_bid(auction.db_id, interaction.user.id, amt)
         except Exception as e:
             logger.error(f"Error saving bid: {e}")
         
-        # تحديث رسالة المزاد
         await update_auction_message(auction)
         
         await interaction.response.send_message(
@@ -254,7 +254,6 @@ class BidModal(Modal, title="اكتب المبلغ"):
         )
 
 class AuctionView(View):
-    """أزرار المزاد"""
     def __init__(self, auction_message_id: int):
         super().__init__(timeout=None)
         self.auction_message_id = auction_message_id
@@ -273,13 +272,11 @@ class AuctionView(View):
         ts = datetime.now(timezone.utc).isoformat()
         auction.bids.append((ts, interaction.user.id, amt))
         
-        # حفظ في DB
         try:
             await db.insert_bid(auction.db_id, interaction.user.id, amt)
         except Exception as e:
             logger.error(f"Error saving bid: {e}")
         
-        # تحديث الرسالة
         await update_auction_message(auction)
         
         await interaction.response.send_message(
@@ -300,7 +297,6 @@ class AuctionView(View):
 # ==================== 🔄 HELPER FUNCTIONS ====================
 
 async def update_auction_message(auction: Auction):
-    """تحديث رسالة المزاد"""
     channel = bot.get_channel(auction.channel_id)
     if not channel:
         return
@@ -328,7 +324,6 @@ async def update_auction_message(auction: Auction):
     await msg.edit(embed=embed, view=view)
 
 async def handle_auction_end(message_id: int, end_time: float):
-    """معالجة نهاية المزاد"""
     now = asyncio.get_event_loop().time()
     wait = end_time - now
     
@@ -341,7 +336,6 @@ async def handle_auction_end(message_id: int, end_time: float):
     
     auction.ended = True
     
-    # تحديث الرسالة
     channel = bot.get_channel(auction.channel_id)
     if channel:
         try:
@@ -357,16 +351,11 @@ async def handle_auction_end(message_id: int, end_time: float):
         except:
             pass
     
-    # حفظ النتيجة في DB
     try:
         await db.end_auction(auction.db_id, auction.highest_bidder, auction.current_price)
     except Exception as e:
         logger.error(f"Error ending auction in DB: {e}")
     
-    # إرسال تقرير في قناة اللوق (إذا موجودة)
-    # يمكن إضافة هذا لاحقاً من الإعدادات
-    
-    # حذف من الذاكرة بعد 5 ثواني
     await asyncio.sleep(5)
     AUCTIONS.pop(message_id, None)
 
@@ -386,12 +375,10 @@ async def cmd_create_auction(
 ):
     await interaction.response.defer(ephemeral=True)
     
-    # التحقق من الصلاحيات
     if not interaction.user.guild_permissions.manage_guild:
         await interaction.followup.send("❌ تحتاج صلاحيات إدارة السيرفر", ephemeral=True)
         return
     
-    # تحليل المدخلات
     start_price = parse_amount(start)
     min_increase = parse_amount(min_inc)
     
@@ -399,18 +386,15 @@ async def cmd_create_auction(
         await interaction.followup.send("❌ المدخلات غير صحيحة", ephemeral=True)
         return
     
-    # إنشاء embed المزاد
     embed = discord.Embed(title="🔥 المزاد مشتعل 🔥", color=0x9b59b6)
     embed.add_field(name="💰 السعر الحالي", value=f"**{fmt_amount(start_price)}**", inline=True)
     embed.add_field(name="👑 أعلى مزايد", value="لا يوجد", inline=True)
     embed.add_field(name="⏳ الوقت المتبقي", value=f"{duration}د", inline=False)
     embed.set_footer(text="السماء الجنوبية | نظام المزادات")
     
-    # إرسال الرسالة
     view = AuctionView(-1)
     msg = await interaction.channel.send(embed=embed, view=view)
     
-    # حفظ في قاعدة البيانات
     started_at = datetime.now(timezone.utc)
     end_time_dt = started_at + timedelta(minutes=duration)
     
@@ -430,7 +414,6 @@ async def cmd_create_auction(
         logger.error(f"Error creating auction in DB: {e}")
         auction_db_id = None
     
-    # إنشاء كائن المزاد
     auction = Auction(
         guild_id=interaction.guild_id,
         channel_id=interaction.channel_id,
@@ -446,7 +429,6 @@ async def cmd_create_auction(
     view.auction_message_id = msg.id
     await msg.edit(view=view)
     
-    # جدولة نهاية المزاد
     asyncio.create_task(handle_auction_end(msg.id, auction.end_time))
     
     await interaction.followup.send(f"✅ تم إنشاء المزاد بنجاح!", ephemeral=True)
@@ -475,11 +457,9 @@ async def cmd_cancel_auction(interaction: discord.Interaction, message_id: str):
         await interaction.followup.send("❌ المزاد منتهي أو ملغي بالفعل", ephemeral=True)
         return
     
-    # إلغاء المزاد
     auction.cancelled = True
     auction.ended = True
     
-    # تحديث الرسالة
     channel = bot.get_channel(auction.channel_id)
     try:
         msg = await channel.fetch_message(auction.message_id)
@@ -495,7 +475,6 @@ async def cmd_cancel_auction(interaction: discord.Interaction, message_id: str):
     except Exception as e:
         logger.error(f"Error updating cancelled auction: {e}")
     
-    # تحديث DB
     try:
         await db.cancel_auction(auction.db_id)
     except Exception as e:
@@ -548,7 +527,7 @@ async def cmd_auction_history(interaction: discord.Interaction, limit: int = 10)
                 status = "❌ لم يتم البيع"
                 winner_str = "لا يوجد"
             
-            value_text = f"**التاريخ:** {date_str}\n**الحالة:** {status}\n**الفائز:** {winner_str}\n**السعر:** {fmt_amount(final_price or 0)}"
+            value_text = f"**التاريخ:** {date_str}\\n**الحالة:** {status}\\n**الفائز:** {winner_str}\\n**السعر:** {fmt_amount(final_price or 0)}"
             
             embed.add_field(name=f"#{auction_id}", value=value_text, inline=False)
         
@@ -579,7 +558,6 @@ async def cmd_export_auctions(interaction: discord.Interaction, limit: int = 100
             await interaction.followup.send("📭 لا توجد بيانات للتصدير", ephemeral=True)
             return
         
-        # إنشاء CSV
         output = StringIO()
         writer = csv.writer(output)
         
@@ -653,19 +631,16 @@ async def cmd_export_auctions(interaction: discord.Interaction, limit: int = 100
 
 @bot.event
 async def on_ready():
-    """عند اتصال البوت بنجاح"""
     try:
         logger.info("=" * 60)
         logger.info("🚀 STARTING AUCTIONBOT...")
         logger.info("=" * 60)
         
-        # الاتصال بقاعدة البيانات
         logger.info("📊 Connecting to database...")
         await db.init_pool(DATABASE_URL)
         await db.create_tables()
         logger.info("✅ Database connected successfully!")
         
-        # التحقق من السيرفرات المسموحة
         if ALLOWED_GUILD_ID:
             logger.info(f"🔒 Guild Lock ENABLED (ID: {ALLOWED_GUILD_ID})")
             
@@ -685,12 +660,10 @@ async def on_ready():
         else:
             logger.warning("⚠️ Guild Lock DISABLED - Bot will work in any server")
         
-        # مزامنة الأوامر
         logger.info("🔄 Syncing commands...")
         await tree.sync()
         logger.info("✅ Commands synced!")
         
-        # طباعة معلومات البوت
         logger.info("=" * 60)
         logger.info("🎉 BOT IS READY AND OPERATIONAL!")
         logger.info(f"👤 Logged in as: {bot.user}")
@@ -714,7 +687,6 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    """عند انضمام البوت لسيرفر جديد"""
     if ALLOWED_GUILD_ID and guild.id != ALLOWED_GUILD_ID:
         logger.warning(f"🚫 Attempted join to unauthorized guild: {guild.name}")
         
@@ -737,14 +709,12 @@ async def on_guild_join(guild: discord.Guild):
 
 @bot.event
 async def on_error(event: str, *args, **kwargs):
-    """معالج الأخطاء"""
     logger.error(f"❌ Error in {event}:")
     logger.error(traceback.format_exc())
 
 # ==================== 🚀 RUN BOT ====================
 
 async def run_bot():
-    """تشغيل البوت مع معالجة الأخطاء"""
     max_retries = 5
     retry_count = 0
     
@@ -796,7 +766,6 @@ async def run_bot():
 
 if __name__ == "__main__":
     try:
-        # التحقق النهائي من المتغيرات
         if len(TOKEN) < 50:
             print("=" * 60)
             print("❌❌❌ فشلنا! DISCORD_TOKEN غير صحيح ❌❌❌")
@@ -805,7 +774,6 @@ if __name__ == "__main__":
             print("💡 تأكد من إضافة Token صحيح في Railway")
             sys.exit(1)
         
-        # تشغيل البوت
         asyncio.run(run_bot())
         
     except KeyboardInterrupt:
@@ -817,3 +785,8 @@ if __name__ == "__main__":
         logger.critical(traceback.format_exc())
         logger.critical("=" * 60)
         sys.exit(1)
+
+
+# ====================================================================
+# END OF FILE: bot.py
+# ====================================================================

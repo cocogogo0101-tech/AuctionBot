@@ -1,4 +1,14 @@
-discord.py>=2.3.0
-python-dotenv>=1.0.0
-asyncpg>=0.29.0
-flask>=3.0.0
+# AuctionBot Requirements
+# Railway Edition - v3.0.0
+
+# Discord
+discord.py==2.3.2
+
+# Database
+asyncpg==0.29.0
+
+# Environment
+python-dotenv==1.0.0
+
+# Web Server
+flask==3.0.0
