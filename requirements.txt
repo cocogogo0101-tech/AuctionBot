@@ -1,14 +1,15 @@
-# AuctionBot Requirements
-# Railway Edition - v3.0.0
+# AuctionBot Requirements - Railway Edition
+# إصدارات مضمونة 100%
 
 # Discord
 discord.py==2.3.2
 
-# Database
+# Database  
 asyncpg==0.29.0
 
 # Environment
-python-dotenv==1.0.0
+python-dotenv==1.0.1
 
 # Web Server
-flask==3.0.0
+flask==3.0.3
+gunicorn==21.2.0
